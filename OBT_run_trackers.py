@@ -24,7 +24,6 @@ class Tracker:
 
 if OVERWRITE_RESULT:
     from trackers.cvpr_2014_color_name import cvpr_2014_color_name
-    from trackers.KMC import KMCTracker
 
 
 def main(argv):

@@ -83,6 +83,36 @@ class cvpr_2014_color_name:
         self.im_crop = self.get_subwindow(im, self.pos, self.patch_size)
         self.get_features()
 
+        # initiliase the appearance
+        self.z_npca = self.xo_npca
+        self.z_pca = self.xo_pca
+
+        # if dimensionality reduction is used: update the projection matrix
+        if self.compressed_features:
+            # compute the mean appearance
+            self.data_mean = np.mean(self.z_pca, axis=0)
+            # substract the mean from the appearance to get the data matrix
+            data_matrix = np.subtract(self.z_pca, self.data_mean[None, :])
+            # calculate the covariance matrix
+            self.cov_matrix = np.cov(data_matrix.T)
+            # calculate the principal components (pca_basis) and corresponding variances
+            U, s, V = np.linalg.svd(self.cov_matrix)
+            S = np.diag(s)
+
+            # calculate the projection matrix as the first principal components
+            # and extract their corresponding variances
+            self.projection_matrix = U[:, :self.num_compressed_dim]
+            self.projection_variances = S[:self.num_compressed_dim, :self.num_compressed_dim]
+            # initialise the old covariance matrix using the computed projection matrix and variance
+            self.old_cov_matrix = np.dot( np.dot( self.projection_matrix, self.projection_variances),
+                                          self.projection_matrix.T)
+
+            # TODO: project the features of the new appearance example using the new projection matrix
+
+            # TODO: calculate the new classifier coefficients
+
+
+
     def detect(self):
         pass
 
@@ -130,10 +160,15 @@ class cvpr_2014_color_name:
             return np.dot(rgb[..., :3], [0.299, 0.587, 0.114])
 
         if self.non_compressed_features == 'gray':
-            self.out_npca = rgb2gray(self.im_crop)/255. - 0.5
+            self.xo_npca = rgb2gray(self.im_crop)/255. - 0.5
 
         if self.compressed_features == 'cn':
-            self.out_pca = self.im2c(self.im_crop)
+            xo_pca_temp = self.im2c(self.im_crop)
+            # 'F' , means to flatten in column-major
+            self.xo_pca = np.reshape(xo_pca_temp,
+                                     (np.prod([xo_pca_temp.shape[0], xo_pca_temp.shape[1]]),
+                                      xo_pca_temp.shape[2]),
+                                     order='F')
 
     def im2c(self, im):
         """
@@ -149,7 +184,7 @@ class cvpr_2014_color_name:
         BB = im[:, :, 2]
 
         # https://docs.scipy.org/doc/numpy/reference/generated/numpy.ndarray.flatten.html
-        # 'F' ,eams to flatten in column-major
+        # 'F' , means to flatten in column-major
         # Because we convert w2c from matlab which is a column-major programming language, Duh >:<
         index_im = np.floor(np.ndarray.flatten(RR, 'F') / 8.) + \
                    32 * np.floor(np.ndarray.flatten(GG, 'F') / 8.) + \
