@@ -14,7 +14,7 @@ from scripts import butil
 from scripts.model.result import Result
 from keras.preprocessing import image
 from scripts.visualisation_utils import plot_tracking_rect, show_precision
-OVERWRITE_RESULT = True
+OVERWRITE_RESULT = False
 DEBUG = False
 
 
@@ -105,7 +105,7 @@ def run_trackers(trackers, seqs, evalType):
     ##################################################
     # chose sequence to run from below
     ##################################################
-    for idxSeq in range(33, numSeq):
+    for idxSeq in range(0, numSeq):
         s = seqs[idxSeq]
         subSeqs, subAnno = butil.get_sub_seqs(s, 20.0, evalType)
 

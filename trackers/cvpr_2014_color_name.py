@@ -54,6 +54,8 @@ class cvpr_2014_color_name:
         self.compressed_features = compressed_features
         self.num_compressed_dim = num_compressed_dim
         self.visualization = visualization
+        self.currentScaleFactor = 1  # no scale method used here
+        self.feature_type = 'cvpr_2014_color_name'
 
         if os.path.isfile(w2c_file_path):
             f = h5py.File(w2c_file_path)
@@ -85,76 +87,75 @@ class cvpr_2014_color_name:
 
         # extract the feature map of the local image patch to train the classifer
         self.im_crop = self.get_subwindow(im, self.pos, self.patch_size)
-        self.xo_npca, self.xo_pca = self.get_features(self.im_crop)
-
         # initiliase the appearance
-        self.z_npca = self.xo_npca
-        self.z_pca = self.xo_pca
+        self.z_npca, self.z_pca = self.get_features(self.im_crop)
 
         # if dimensionality reduction is used: update the projection matrix
         if self.compressed_features:
-            # compute the mean appearance
-            self.data_mean = np.mean(self.z_pca, axis=0)
-            # substract the mean from the appearance to get the data matrix
-            data_matrix = np.subtract(self.z_pca, self.data_mean[None, :])
-            # calculate the covariance matrix
-            self.cov_matrix = np.cov(data_matrix.T)
-            # calculate the principal components (pca_basis) and corresponding variances
-            U, s, V = np.linalg.svd(self.cov_matrix)
-            S = np.diag(s)
-
-            # calculate the projection matrix as the first principal components
-            # and extract their corresponding variances
-            self.projection_matrix = U[:, :self.num_compressed_dim]
-            self.projection_variances = S[:self.num_compressed_dim, :self.num_compressed_dim]
-            # initialise the old covariance matrix using the computed projection matrix and variance
-            self.old_cov_matrix = np.dot(np.dot(self.projection_matrix, self.projection_variances),
-                                         self.projection_matrix.T)
+            self.projection_matrix = self.calculate_projection(self.z_pca, old_cov_matrix=False)
 
         # project the features of the new appearance example using the new projection matrix
-        self.x = self.feature_projection(self.xo_npca, self.xo_pca,
-                                         self.projection_matrix, self.cos_window)
-        self.xf = self.fft2(self.x)
-        # compute the compressed learnt appearance
-        self.zp = self.x
-        self.zpf = self.xf
+        self.zp = self.feature_projection(self.z_npca, self.z_pca, self.projection_matrix, self.cos_window)
 
         # calculate the new classifier coefficients
-        self.kf = self.fft2(self.dense_gauss_kernel(self.sigma, self.xf, self.x))
+        self.kf = self.fft2(self.dense_gauss_kernel(self.sigma, self.zp))
         self.alpha_num = np.multiply(self.yf, self.kf)
         self.alpha_den = np.multiply(self.kf, (self.kf + self.lambda_value))
 
-        self.res.append(init_rect)
-
     def detect(self, im, frame):
+        """
+        :param im: new dectection image
+        :param frame: frame number
+        :return: position of the new frame
+        """
+        # compute the compressed learnt appearance
+        self.zp = self.feature_projection(self.z_npca, self.z_pca, self.projection_matrix, self.cos_window)
 
         # extract the feature map of the local image patch
         self.im_crop = self.get_subwindow(im, self.pos, self.patch_size)
         self.xo_npca, self.xo_pca = self.get_features(self.im_crop)
 
         # do the dimensionality reduction and windowing
-        self.x = self.feature_projection(self.xo_npca, self.xo_pca,
-                                         self.projection_matrix, self.cos_window)
-        self.xf = self.fft2(self.x)
+        self.x = self.feature_projection(self.xo_npca, self.xo_pca, self.projection_matrix, self.cos_window)
 
         # calculate the response of the classifier
-        self.kf = self.fft2(self.dense_gauss_kernel(self.sigma, self.zpf, self.zp, self.xf, self.x))
+        self.kf = self.fft2(self.dense_gauss_kernel(self.sigma, self.x, self.zp))
         self.response = np.real(np.fft.ifft2(np.divide(np.multiply(self.alpha_num, self.kf), self.alpha_den)))
 
-        # TODO: target location is at the maximum response
+        # target location is at the maximum response
+        v_centre, h_centre = np.unravel_index(self.response.argmax(), self.response.shape)
+        self.vert_delta, self.horiz_delta = [v_centre - np.floor(self.response.shape[0] / 2),
+                                             h_centre - np.floor(self.response.shape[1] / 2)]
+        self.pos = np.array(self.pos) + np.array([self.vert_delta, self.horiz_delta])
 
-        # TODO: extract the feature map of the local image path to train the classifier
-        
-        # TODO: update the appearance
+        # extract the feature map of the local image path to train the classifier
+        self.im_crop = self.get_subwindow(im, self.pos, self.patch_size)
+        self.xo_npca, self.xo_pca = self.get_features(self.im_crop)
+        #  update the appearance
+        self.z_npca = (1 - self.learning_rate) * self.z_npca + self.learning_rate * self.xo_npca
+        self.z_pca = (1 - self.learning_rate) * self.z_pca + self.learning_rate * self.xo_pca
 
-        # TODO: put the dimensionality reduction into a function call...*[]:
+        if self.compressed_features:
+            self.projection_matrix = self.calculate_projection(self.z_pca, old_cov_matrix=True)
 
+        # project the features of the new appearance example using the new projection matrix
+        self.x = self.feature_projection(self.xo_npca, self.xo_pca, self.projection_matrix, self.cos_window)
 
+        # calculate the new classifier coefficients
+        kf_new = self.fft2(self.dense_gauss_kernel(self.sigma, self.x))
+        alpha_num_new = np.multiply(self.yf, kf_new)
+        alpha_den_new = np.multiply(kf_new, (kf_new + self.lambda_value))
+        # subsequence frames, update the model
+        self.alpha_num = (1 - self.learning_rate) * self.alpha_num + self.learning_rate * alpha_num_new
+        self.alpha_den = (1 - self.learning_rate) * self.alpha_den + self.learning_rate * alpha_den_new
 
-        # compute the compressed learnt appearance
-        self.zp = self.feature_projection(self.z_npca, self.z_pca,
-                                         self.projection_matrix, self.cos_window)
-
+        # we also require the bounding box to be within the image boundary
+        # self.res.append([min(self.im_sz[1] - self.target_sz[1], max(0, self.pos[1] - self.target_sz[1] / 2.)),
+        #                  min(self.im_sz[0] - self.target_sz[0], max(0, self.pos[0] - self.target_sz[0] / 2.)),
+        #                  self.target_sz[1], self.target_sz[0]])
+        self.res.append([self.pos[1] - self.target_sz[1]/2., self.pos[0] - self.target_sz[0]/2.,
+                         self.target_sz[1], self.target_sz[0]])
+        return self.pos
 
     def fft2(self, x):
         """
@@ -204,11 +205,12 @@ class cvpr_2014_color_name:
 
         if self.compressed_features == 'cn':
             xo_pca_temp = self.im2c(im_crop)
-            # 'F' , means to flatten in column-major
             xo_pca = np.reshape(xo_pca_temp,
-                                     (np.prod([xo_pca_temp.shape[0], xo_pca_temp.shape[1]]),
-                                      xo_pca_temp.shape[2]),
-                                     order='F')
+                                (np.prod([xo_pca_temp.shape[0], xo_pca_temp.shape[1]]), xo_pca_temp.shape[2]))
+            # # 'F' , means to flatten in column-major
+            # xo_pca = np.reshape(xo_pca_temp,
+            #                     (np.prod([xo_pca_temp.shape[0], xo_pca_temp.shape[1]]), xo_pca_temp.shape[2]),
+            #                     order='F')
 
         return xo_npca, xo_pca
 
@@ -259,7 +261,7 @@ class cvpr_2014_color_name:
         features = np.multiply(z, cos_window[:, :, None])
         return features
 
-    def dense_gauss_kernel(self, sigma, xf, x, zf=None, z=None):
+    def dense_gauss_kernel(self, sigma, x, y=None):
         """
         Gaussian Kernel with dense sampling.
         Evaluates a gaussian kernel with bandwidth SIGMA for all displacements
@@ -274,19 +276,53 @@ class cvpr_2014_color_name:
         :param y: if y is None, then we calculate the auto-correlation
         :return:
         """
-        N = xf.shape[0]*xf.shape[1]
+        N = np.prod(x.shape)
+        xf = self.fft2(x)
         xx = np.dot(x.flatten().transpose(), x.flatten())  # squared norm of x
 
-        if zf is None:
+        if y is None:
             # auto-correlation of x
-            zf = xf
-            zz = xx
+            yf = xf
+            yy = xx
         else:
-            zz = np.dot(z.flatten().transpose(), z.flatten())  # squared norm of y
+            yf = self.fft2(y)
+            yy = np.dot(y.flatten().transpose(), y.flatten())  # squared norm of y
 
-        xyf = np.multiply(zf, np.conj(xf))
+        xyf = np.multiply(xf, np.conj(yf))
         xy = np.real(np.fft.ifft2(np.sum(xyf, axis=2)))
 
-        k = np.exp(-1. / sigma**2 * np.maximum(0, (xx + zz - 2 * xy)) / N)
+        k = np.exp(-1. / sigma**2 * np.maximum(0, (xx + yy - 2 * xy)) / N)
 
         return k
+
+    def calculate_projection(self, z_pca, old_cov_matrix=False):
+        # compute the mean appearance
+        data_mean = np.mean(z_pca, axis=0)
+        # substract the mean from the appearance to get the data matrix
+        data_matrix = np.subtract(z_pca, data_mean[None, :])
+        # calculate the covariance matrix
+        cov_matrix = np.cov(data_matrix.T)
+        # calculate the principal components (pca_basis) and corresponding variances
+        if old_cov_matrix:
+            cov_matrix = (1 - self.compression_learning_rate) * self.old_cov_matrix + \
+                         self.compression_learning_rate * cov_matrix
+        else:
+            cov_matrix = cov_matrix
+        U, s, V = np.linalg.svd(cov_matrix)
+        S = np.diag(s)
+
+        # calculate the projection matrix as the first principal components
+        # and extract their corresponding variances
+        projection_matrix = U[:, :self.num_compressed_dim]
+        projection_variances = S[:self.num_compressed_dim, :self.num_compressed_dim]
+        # initialise the old covariance matrix using the computed projection matrix and variance
+        if old_cov_matrix:
+            self.old_cov_matrix = (1 - self.compression_learning_rate) * self.old_cov_matrix \
+                                  + self.compression_learning_rate * \
+                                    np.dot(np.dot(projection_matrix, projection_variances), projection_matrix.T)
+        else:
+            self.old_cov_matrix = np.dot(np.dot(projection_matrix, projection_variances), projection_matrix.T)
+
+        return projection_matrix
+
+
