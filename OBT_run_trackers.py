@@ -14,8 +14,8 @@ from scripts import butil
 from scripts.model.result import Result
 from keras.preprocessing import image
 from scripts.visualisation_utils import plot_tracking_rect, show_precision
-OVERWRITE_RESULT = False
-DEBUG = False
+OVERWRITE_RESULT = True
+DEBUG = True
 
 
 class Tracker:
@@ -23,12 +23,14 @@ class Tracker:
         self.name = name
 
 if OVERWRITE_RESULT:
-    from trackers.cvpr_2014_color_name import cvpr_2014_color_name
+    #from trackers.cvpr_2014_color_name import cvpr_2014_color_name
+    from trackers.bmvc_2014_pami_2014_fDSST import bmvc_2014_pami_2014_fDSST
 
 
 def main(argv):
     if OVERWRITE_RESULT:
-        trackers = [cvpr_2014_color_name()]
+        #trackers = [cvpr_2014_color_name()]
+        trackers = [bmvc_2014_pami_2014_fDSST()]
     else:
         trackers = [Tracker(name='cvpr_2014_color_name')]
 
@@ -105,7 +107,7 @@ def run_trackers(trackers, seqs, evalType):
     ##################################################
     # chose sequence to run from below
     ##################################################
-    for idxSeq in range(0, numSeq):
+    for idxSeq in range(36, numSeq):
         s = seqs[idxSeq]
         subSeqs, subAnno = butil.get_sub_seqs(s, 20.0, evalType)
 
@@ -149,18 +151,22 @@ def run_trackers(trackers, seqs, evalType):
 
 
 def run_KCF_variant(tracker, seq):
-    start_time = time.time()
+
     start_frame = 0
+    total_time = 0
     tracker.res = []
     for frame in range(start_frame, seq.endFrame - seq.startFrame+1):
         image_filename = seq.s_frames[frame]
         image_path = os.path.join(seq.path, image_filename)
         img_rgb = image.load_img(image_path)
         img_rgb = image.img_to_array(img_rgb)
+
+        start_time = time.time()
         if frame == start_frame:
             tracker.train(img_rgb, seq.gtRect[start_frame])
         else:
             tracker.detect(img_rgb, frame)
+        total_time += time.time() - start_time
 
         if DEBUG and frame > start_frame:
             print("Frame ==", frame)
@@ -170,7 +176,6 @@ def run_KCF_variant(tracker, seq):
             print("\n")
             plot_tracking_rect(seq.name, frame + seq.startFrame, img_rgb, tracker, seq.gtRect)
 
-    total_time = time.time() - start_time
     tracker.fps = len(tracker.res) / total_time
     print("Frames-per-second:", tracker.fps)
 
