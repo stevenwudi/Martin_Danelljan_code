@@ -24,7 +24,9 @@ email: stevenwudi@gmail.com  2017/08/01
 """
 import numpy as np
 import matplotlib.pyplot as plt
-
+from scipy.misc import imresize
+from scripts.pyhog import pyhog
+import cv2
 
 class bmvc_2014_pami_2014_fDSST:
     def __init__(self,
@@ -129,7 +131,7 @@ class bmvc_2014_pami_2014_fDSST:
 
         if self.number_of_scales > 0:
             # make sure the scale model is not too large so as to save computation time
-            if self.scale_model_factor**2 * np.floor(self.init_target_sz) > self.scale_model_max_area:
+            if self.scale_model_factor**2 * np.prod(self.init_target_sz) > self.scale_model_max_area:
                 self.scale_model_factor = np.sqrt(self.scale_model_max_area/np.prod(self.init_target_sz))
 
             # set the scale model size
@@ -141,14 +143,15 @@ class bmvc_2014_pami_2014_fDSST:
             #if self.s_num_compressed_dim == 'MAX':
 
         # TODO: Compute coefficients for the tranlsation filter
+        # extract the feature map of the local image patch to train the classifer
+        self.im_crop_origin = self.get_subwindow(im, self.pos, self.patch_size*self.currentScaleFactor)
+        # redudant below, but for the sake of formality
+        #self.im_crop = imresize(self.im_crop_origin, self.patch_size)
+        self.im_crop = self.im_crop_origin
+        # initiliase the appearance
+        self.z_npca, self.z_pca = self.get_features(self.im_crop)
 
         # TODO: Compute coefficents for the scale filter
-
-
-
-
-
-
 
 
     def detect(self, im, frame):
@@ -162,3 +165,82 @@ class bmvc_2014_pami_2014_fDSST:
         :return:  M*N*C the FFT2 of the first two dimension
         """
         return np.fft.fft2(x, axes=(0, 1))
+
+    def get_subwindow(self, im, pos, sz):
+        """
+        Obtain sub-window from image, with replication-padding.
+        Returns sub-window of image IM centered at POS ([y, x] coordinates),
+        with size SZ ([height, width]). If any pixels are outside of the image,
+        they will replicate the values at the borders.
+
+        The subwindow is also normalized to range -0.5 .. 0.5, and the given
+        cosine window COS_WINDOW is applied
+        (though this part could be omitted to make the function more general).
+        """
+
+        if np.isscalar(sz):  # square sub-window
+            sz = [sz, sz]
+
+        ys = np.floor(pos[0]) + np.arange(sz[0], dtype=int) - np.floor(sz[0] / 2)
+        xs = np.floor(pos[1]) + np.arange(sz[1], dtype=int) - np.floor(sz[1] / 2)
+
+        ys = ys.astype(int)
+        xs = xs.astype(int)
+
+        # check for out-of-bounds coordinates and set them to the values at the borders
+        ys[ys < 0] = 0
+        ys[ys >= self.im_sz[0]] = self.im_sz[0] - 1
+
+        xs[xs < 0] = 0
+        xs[xs >= self.im_sz[1]] = self.im_sz[1] - 1
+
+        return im[np.ix_(ys, xs)]
+
+    def get_features(self, im_crop):
+        """
+        :param im_crop:
+        :return:
+        """
+        # because the hog output is (dim/4)-2>1:
+        if self.patch_size.min() < 12:
+            scale_up_factor = 12. / np.min(im_crop)
+            im_patch_resized = imresize(im_crop, np.asarray(self.patch_size * scale_up_factor).astype('int'))
+
+        features_hog = pyhog.features_pedro(im_crop.astype(np.float64) / 255.0, 4)
+        cell_gray = self.cell_gray(self.im_crop)
+
+        temp_pca = np.concatenate([features_hog, cell_gray[:, :, None]], axis=2)
+        out_pca = temp_pca.reshape([temp_pca.shape[0]*temp_pca.shape[1], temp_pca.shape[2]])
+
+        return [], out_pca
+
+    def cell_gray(self, img):
+        """
+        Average the intensity over a single hog-cell
+        :param img:
+        :return:
+        """
+        def rgb2gray(rgb):
+            return np.dot(rgb[..., :3], [0.299, 0.587, 0.114])
+
+        if len(img.shape) == 3:
+            gray_img = rgb2gray(img)
+        else:
+            gray_img = img
+
+        # compute the integral image
+        integral_img = cv2.integral(gray_img)
+        cell_size = int(self.featureRatio)
+
+        i1 = np.array(range(cell_size, gray_img.shape[0]+1, cell_size))
+        i2 = np.array(range(cell_size, gray_img.shape[1]+1, cell_size))
+        A1, A2 = np.meshgrid(i1 - cell_size, i2 - cell_size)
+        B1, B2 = np.meshgrid(i1, i2 - cell_size)
+        C1, C2 = np.meshgrid(i1 - cell_size, i2)
+        D1, D2 = np.meshgrid(i1, i2)
+        # cell_sum = integral_img[A1, A2] - integral_img(B1, i2 - cell_size) -\
+        #            integral_img(i1 - cell_size) + integral_img(i1 - cell_size, + i2 - cell_size)
+
+        cell_sum = integral_img[A1, A2] - integral_img[B1, B2] - integral_img[C1, C2] + integral_img[D1, D2]
+        cell_gray = cell_sum.T / (cell_size**2 * 255) - 0.5
+        return cell_gray

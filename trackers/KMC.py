@@ -577,7 +577,7 @@ class KMCTracker:
         return features
 
     def get_scale_sample(self, im, scaleFactors):
-        from pyhog import pyhog
+        from scripts.pyhog import pyhog
         resized_im_array = []
         for i, s in enumerate(scaleFactors):
             patch_sz = np.floor(self.first_target_sz * s)
