@@ -47,6 +47,9 @@ class bmvc_2014_pami_2014_fDSST:
                  scale_model_max_area=512,
                  s_num_compressed_dim='MAX',
                  featureRatio=4.0,
+                 compressed_features='hog_gray',
+                 non_compressed_features=None,
+                 kernel='linear',
                  visualisation=1,
                  ):
         """
@@ -68,6 +71,9 @@ class bmvc_2014_pami_2014_fDSST:
         :param scale_model_max_area: the maximum size of scale examples
         :param s_num_compressed_dim: number of compressed scale feature dimensions
         :param featureRatio: HOG window size
+        :param compressed_features: names of the features for PCA compression
+        :param non_compressed_features: not compressed features
+        :param kernel: 'linear' or 'rbf'
         :param visualisation: flag for visualistion
         """
         self.padding = padding
@@ -88,6 +94,12 @@ class bmvc_2014_pami_2014_fDSST:
         self.s_num_compressed_dim = s_num_compressed_dim
         self.visualisation = visualisation
         self.featureRatio = featureRatio
+        self.compressed_features = compressed_features
+        self.non_compressed_features = non_compressed_features
+        self.kernel = kernel
+
+        self.old_cov_matrix = []
+        self.old_cov_matrix_scale = []
 
         if self.number_of_scales > 0:
             self.scale_sigma = self.number_of_interp_scales * self.scale_sigma_factor
@@ -129,34 +141,99 @@ class bmvc_2014_pami_2014_fDSST:
         self.y = np.exp(-0.5 / self.output_sigma ** 2 * (rs ** 2 + cs ** 2))
         self.yf = self.fft2(self.y)
 
-        if self.number_of_scales > 0:
-            # make sure the scale model is not too large so as to save computation time
-            if self.scale_model_factor**2 * np.prod(self.init_target_sz) > self.scale_model_max_area:
-                self.scale_model_factor = np.sqrt(self.scale_model_max_area/np.prod(self.init_target_sz))
+        # store pre-computed cosine window
+        self.cos_window = np.outer(np.hanning(np.floor(self.patch_size[0]/self.featureRatio)),
+                                   np.hanning(np.floor(self.patch_size[1]/self.featureRatio)))
 
-            # set the scale model size
-            self.scale_model_sz = np.floor(self.init_target_sz * self.scale_model_factor)
-            # force reasonable scale changes
-            self.min_scale_factor = self.scale_step ** np.ceil(np.log(np.max(5. / self.patch_size)) / np.log(self.scale_step))
-            self.max_scale_factor = self.scale_step ** np.floor(np.log(np.min(np.array([im.shape[0], im.shape[1]]) * 1.0 / self.base_target_sz)) / np.log(self.scale_step))
+        # make sure the scale model is not too large so as to save computation time
+        if self.scale_model_factor**2 * np.prod(self.init_target_sz) > self.scale_model_max_area:
+            self.scale_model_factor = np.sqrt(float(self.scale_model_max_area)/np.prod(self.init_target_sz))
 
-            #if self.s_num_compressed_dim == 'MAX':
+        # set the scale model size
+        self.scale_model_sz = np.floor(self.init_target_sz * self.scale_model_factor)
+        # force reasonable scale changes
+        self.min_scale_factor = self.scale_step ** np.ceil(np.log(np.max(5. / self.patch_size)) / np.log(self.scale_step))
+        self.max_scale_factor = self.scale_step ** np.floor(np.log(np.min(np.array([im.shape[0], im.shape[1]]) * 1.0 / self.base_target_sz)) / np.log(self.scale_step))
 
-        # TODO: Compute coefficients for the tranlsation filter
+        if self.s_num_compressed_dim == 'MAX':
+            self.s_num_compressed_dim = len(self.scaleSizeFactors)
+
+        ################################################################################################################
+        # Compute coefficients for the tranlsation filter
+        ################################################################################################################
         # extract the feature map of the local image patch to train the classifer
         self.im_crop_origin = self.get_subwindow(im, self.pos, self.patch_size*self.currentScaleFactor)
         # redudant below, but for the sake of formality
         #self.im_crop = imresize(self.im_crop_origin, self.patch_size)
         self.im_crop = self.im_crop_origin
         # initiliase the appearance
-        self.z_npca, self.z_pca = self.get_features(self.im_crop)
+        self.h_num_npca, self.h_num_pca = self.get_features(self.im_crop)
 
-        # TODO: Compute coefficents for the scale filter
+        # if dimensionality reduction is used: update the projection matrix
+        if self.compressed_features:
+            self.projection_matrix, self.old_cov_matrix = \
+                self.calculate_projection(self.h_num_pca, self.num_compressed_dim,
+                                          self.interp_factor, self.old_cov_matrix)
 
+        # project the features of the new appearance example using the new projection matrix
+        self.h_proj = self.feature_projection(self.h_num_npca, self.h_num_pca, self.projection_matrix, self.cos_window)
+
+        if self.kernel == 'linear':
+            self.hf_proj = self.fft2(self.h_proj)
+            self.hf_num = np.multiply(np.conj(self.yf[:, :, None]), self.hf_proj)
+            self.hf_den = np.sum(np.multiply(self.hf_proj, np.conj(self.hf_proj)), 2) + self.lambda_value
+
+        elif self.kernel == 'gaussian':
+            # calculate the new classifier coefficients
+            self.kf = self.fft2(self.dense_gauss_kernel(self.sigma, self.zp))
+            self.alpha_num = np.multiply(self.yf, self.kf)
+            self.alpha_den = np.multiply(self.kf, (self.kf + self.lambda_value))
+
+        ################################################################################################################
+        # Compute coefficents for the scale filter
+        ################################################################################################################
+
+        self.xs_pca = self.get_scale_subwindow(im, self.pos, self.base_target_sz,
+                                          self.currentScaleFactor * self.scaleSizeFactors, self.scale_model_sz)
+
+        # project the features of the new appearance example using the new projection matrix
+        if self.compressed_features:
+            self.projection_matrix_scale, self.old_cov_matrix_scale = \
+                self.calculate_projection(self.xs_pca, self.s_num_compressed_dim,
+                                          self.interp_factor, self.old_cov_matrix_scale)
+
+        self.s_proj = self.feature_projection([], self.xs_pca, self.projection_matrix_scale, self.scale_wnidow)
+
+        if self.kernel == 'linear':
+            self.sf_proj = np.fft.fft(self.s_proj, axis=0)
+            self.sf_num = np.multiply(np.conj(self.ysf), self.sf_proj)
+            self.sf_den = np.sum(np.multiply(self.sf_proj, np.conj(self.sf_proj)), 1)
+
+        elif self.kernel == 'gaussian':
+            # calculate the new classifier coefficients
+            self.kf = self.fft2(self.dense_gauss_kernel(self.sigma, self.zp))
+            self.alpha_num = np.multiply(self.yf, self.kf)
+            self.alpha_den = np.multiply(self.kf, (self.kf + self.lambda_value))
 
     def detect(self, im, frame):
-        # TODO: write detection function
-        pass
+        # extract the feature map of the local image patch to train the classifer
+        self.im_crop_origin = self.get_subwindow(im, self.pos, self.patch_size * self.currentScaleFactor)
+        # redudant below, but for the sake of formality
+        # self.im_crop = imresize(self.im_crop_origin, self.patch_size)
+        self.im_crop = self.im_crop_origin
+        # initiliase the appearance
+        self.h_num_npca, self.h_num_pca = self.get_features(self.im_crop)
+        # project the features of the new appearance example using the new projection matrix
+        xt = self.feature_projection(self.h_num_npca, self.h_num_pca, self.projection_matrix, self.cos_window)
+        xtf = self.fft2(xt)
+        response_f = np.divide(np.sum(np.multiply(np.conj(self.hf_num), xtf), 2), self.hf_den)
+        response = np.fft.ifft2(response_f, axes=(0,1))
+
+        # TODO: do we need to interpolate the respons_f in the fourier domain? Or should we wait for the ECCV16 paper?
+
+        # TODO: update scale module which is actually the main purpose of this paper...
+
+
 
     def fft2(self, x):
         """
@@ -196,17 +273,56 @@ class bmvc_2014_pami_2014_fDSST:
 
         return im[np.ix_(ys, xs)]
 
+    def get_scale_subwindow(self, im, pos, base_target_sz, scaleFactors, scale_model_sz):
+        """
+        Obtain sub-window from image, with replication-padding.
+        Returns sub-window of image IM centered at POS ([y, x] coordinates),
+        with size SZ ([height, width]). If any pixels are outside of the image,
+        they will replicate the values at the borders.
+
+        The subwindow is also normalized to range -0.5 .. 0.5, and the given
+        cosine window COS_WINDOW is applied
+        (though this part could be omitted to make the function more general).
+        """
+        out_pca = []
+
+        for s in range(len(scaleFactors)):
+            patch_sz = np.floor(base_target_sz * scaleFactors[s])
+
+            ys = np.floor(pos[0]) + np.arange(patch_sz[0], dtype=int) - np.floor(patch_sz[0] / 2)
+            xs = np.floor(pos[1]) + np.arange(patch_sz[1], dtype=int) - np.floor(patch_sz[1] / 2)
+
+            ys = ys.astype(int)
+            xs = xs.astype(int)
+
+            # check for out-of-bounds coordinates and set them to the values at the borders
+            ys[ys < 0] = 0
+            ys[ys >= self.im_sz[0]] = self.im_sz[0] - 1
+
+            xs[xs < 0] = 0
+            xs[xs >= self.im_sz[1]] = self.im_sz[1] - 1
+
+            # extract image
+            im_patch = im[np.ix_(ys, xs)]
+            im_patch_resized = imresize(im_patch, scale_model_sz.astype(int))
+
+            # extract scale features
+            temp_hog = pyhog.features_pedro(im_patch_resized.astype(np.float64) / 255.0, int(self.featureRatio))
+            out_pca.append(temp_hog.flatten())
+
+        return np.asarray(out_pca)
+
     def get_features(self, im_crop):
         """
         :param im_crop:
         :return:
         """
-        # because the hog output is (dim/4)-2>1:
-        if self.patch_size.min() < 12:
-            scale_up_factor = 12. / np.min(im_crop)
-            im_patch_resized = imresize(im_crop, np.asarray(self.patch_size * scale_up_factor).astype('int'))
+        # because the hog output is (dim/4)>1:
+        # if self.patch_size.min() < 12:
+        #     scale_up_factor = 12. / np.min(im_crop)
+        #     im_crop = imresize(im_crop, np.asarray(self.patch_size * scale_up_factor).astype('int'))
 
-        features_hog = pyhog.features_pedro(im_crop.astype(np.float64) / 255.0, 4)
+        features_hog = pyhog.features_pedro(im_crop.astype(np.float64) / 255.0, int(self.featureRatio))
         cell_gray = self.cell_gray(self.im_crop)
 
         temp_pca = np.concatenate([features_hog, cell_gray[:, :, None]], axis=2)
@@ -238,9 +354,72 @@ class bmvc_2014_pami_2014_fDSST:
         B1, B2 = np.meshgrid(i1, i2 - cell_size)
         C1, C2 = np.meshgrid(i1 - cell_size, i2)
         D1, D2 = np.meshgrid(i1, i2)
-        # cell_sum = integral_img[A1, A2] - integral_img(B1, i2 - cell_size) -\
-        #            integral_img(i1 - cell_size) + integral_img(i1 - cell_size, + i2 - cell_size)
 
         cell_sum = integral_img[A1, A2] - integral_img[B1, B2] - integral_img[C1, C2] + integral_img[D1, D2]
         cell_gray = cell_sum.T / (cell_size**2 * 255) - 0.5
+
         return cell_gray
+
+    def calculate_projection(self, z_pca, num_compressed_dim, compression_learning_rate, old_cov_matrix=None):
+        # compute the mean appearance
+        data_mean = np.mean(z_pca, axis=0)
+        # substract the mean from the appearance to get the data matrix
+        data_matrix = np.subtract(z_pca, data_mean[None, :])
+        # calculate the covariance matrix
+        cov_matrix = np.cov(data_matrix.T)
+        # calculate the principal components (pca_basis) and corresponding variances
+        if len(old_cov_matrix):
+            cov_matrix = (1 - compression_learning_rate) * old_cov_matrix + \
+                         compression_learning_rate * cov_matrix
+        else:
+            cov_matrix = cov_matrix
+        U, s, V = np.linalg.svd(cov_matrix)
+        S = np.diag(s)
+
+        # calculate the projection matrix as the first principal components
+        # and extract their corresponding variances
+        projection_matrix = U[:, :num_compressed_dim]
+        projection_variances = S[:num_compressed_dim, :num_compressed_dim]
+        # initialise the old covariance matrix using the computed projection matrix and variance
+        if old_cov_matrix:
+            old_cov_matrix = (1 - compression_learning_rate) * old_cov_matrix \
+                                  + compression_learning_rate * \
+                                    np.dot(np.dot(projection_matrix, projection_variances), projection_matrix.T)
+        else:
+            old_cov_matrix = np.dot(np.dot(projection_matrix, projection_variances), projection_matrix.T)
+
+        return projection_matrix, old_cov_matrix
+
+    def feature_projection(self, xo_npca, xo_pca, projection_matrix, cos_window):
+        """
+        Calcaultes the compressed feature map by mapping the PCA features with the projection matrix
+        and concatinates this with the non-PCA features. The feature map is than multiplied with a cosine-window.
+        :return:
+        """
+        if not self.compressed_features:
+            z = xo_npca
+        else:
+            # project the PCA-features using the projection matrix and reshape to a window
+            if len(cos_window.shape) > 1:
+                x_proj_pca = np.dot(xo_pca, projection_matrix).reshape(
+                    (cos_window.shape[0], cos_window.shape[1], projection_matrix.shape[1]))
+            else:
+                # one dimensional scale featurers
+                x_proj_pca = np.dot(xo_pca, projection_matrix)
+
+            # concatinate the feature windows
+            if not self.non_compressed_features:
+                z = x_proj_pca
+            else:
+                # gray scale concatenate with color names
+                if len(xo_npca.shape) != len(x_proj_pca.shape):
+                    z = np.concatenate((xo_npca[:, :, None], x_proj_pca), axis=2)
+
+        if len(cos_window.shape) > 1:
+            features = np.multiply(z, cos_window[:, :, None])
+        else:
+            features = np.multiply(z, cos_window[:, None])
+
+        return features
+
+
