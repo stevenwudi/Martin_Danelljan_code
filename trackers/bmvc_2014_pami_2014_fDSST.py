@@ -174,8 +174,8 @@ class bmvc_2014_pami_2014_fDSST:
 
         self.use_sz = np.floor(self.patch_size/self.feature_ratio)
         # compute Y
-        grid_y = np.arange(np.floor(self.use_sz[0])) - np.floor(self.use_sz[0] / 2)
-        grid_x = np.arange(np.floor(self.use_sz[1])) - np.floor(self.use_sz[1] / 2)
+        grid_y = np.roll(np.arange(np.floor(self.use_sz[0])) - np.floor(self.use_sz[0] / 2), int(-np.floor(self.use_sz[0]/2)))
+        grid_x = np.roll(np.arange(np.floor(self.use_sz[1])) - np.floor(self.use_sz[1] / 2), int(-np.floor(self.use_sz[1]/2)))
         rs, cs = np.meshgrid(grid_x, grid_y)
         self.y = np.exp(-0.5 / self.output_sigma ** 2 * (rs ** 2 + cs ** 2))
         self.yf = self.fft2(self.y)
@@ -278,8 +278,7 @@ class bmvc_2014_pami_2014_fDSST:
 
         self.response = np.real(np.fft.ifft2(response_f))
         # target location is at the maximum response
-        v_centre, h_centre = np.unravel_index(self.response.argmax(), self.response.shape)
-        self.vert_delta, self.horiz_delta = [v_centre - self.v_centre_y, h_centre - self.h_centre_y]
+        self.vert_delta, self.horiz_delta = np.unravel_index(self.response.argmax(), self.response.shape)
 
         if self.interpolate_response:
             translation_vec = np.array([self.vert_delta, self.horiz_delta]) * self.currentScaleFactor
