@@ -23,14 +23,18 @@ class Tracker:
         self.name = name
 
 if OVERWRITE_RESULT:
-    #from trackers.cvpr_2014_color_name import cvpr_2014_color_name
+    from trackers.cvpr_2014_color_name import cvpr_2014_color_name
     from trackers.bmvc_2014_pami_2014_fDSST import bmvc_2014_pami_2014_fDSST
 
 
 def main(argv):
     if OVERWRITE_RESULT:
-        #trackers = [cvpr_2014_color_name()]
-        trackers = [bmvc_2014_pami_2014_fDSST()]
+        trackers = [cvpr_2014_color_name()]
+        trackers = [bmvc_2014_pami_2014_fDSST(number_of_scales=17,
+                                              padding=2.0,
+                                              interpolate_response=True,
+                                              kernel='linear',
+                                              compressed_features='gray_hog')]
     else:
         trackers = [Tracker(name='cvpr_2014_color_name')]
 
@@ -153,7 +157,6 @@ def run_trackers(trackers, seqs, evalType):
 def run_KCF_variant(tracker, seq):
 
     start_frame = 0
-    total_time = 0
     tracker.res = []
     for frame in range(start_frame, seq.endFrame - seq.startFrame+1):
         image_filename = seq.s_frames[frame]
@@ -164,6 +167,7 @@ def run_KCF_variant(tracker, seq):
         start_time = time.time()
         if frame == start_frame:
             tracker.train(img_rgb, seq.gtRect[start_frame])
+            total_time = 0
         else:
             tracker.detect(img_rgb, frame)
         total_time += time.time() - start_time
@@ -172,7 +176,7 @@ def run_KCF_variant(tracker, seq):
             print("Frame ==", frame)
             print('horiz_delta: %.2f, vert_delta: %.2f' % (tracker.horiz_delta, tracker.vert_delta))
             print("pos", np.array(tracker.res[-1]).astype(int))
-            print("gt", seq.gtRect[frame])
+            print("gt", np.array(seq.gtRect[frame]).astype(int))
             print("\n")
             plot_tracking_rect(seq.name, frame + seq.startFrame, img_rgb, tracker, seq.gtRect)
 
