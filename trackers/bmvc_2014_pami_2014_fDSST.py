@@ -278,7 +278,9 @@ class bmvc_2014_pami_2014_fDSST:
 
         self.response = np.real(np.fft.ifft2(response_f))
         # target location is at the maximum response
-        self.vert_delta, self.horiz_delta = np.unravel_index(self.response.argmax(), self.response.shape)
+        row, col = np.unravel_index(self.response.argmax(), self.response.shape)
+        self.vert_delta = np.mod(row + np.floor((self.interp_sz[0]-1)/2), self.interp_sz[0]) - np.floor((self.interp_sz[0]-1)/2)
+        self.horiz_delta = np.mod(col + np.floor((self.interp_sz[1]-1)/2), self.interp_sz[1]) - np.floor((self.interp_sz[1]-1)/2)
 
         if self.interpolate_response:
             translation_vec = np.array([self.vert_delta, self.horiz_delta]) * self.currentScaleFactor
