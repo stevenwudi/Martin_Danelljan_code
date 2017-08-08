@@ -128,12 +128,15 @@ class bmvc_2014_pami_2014_fDSST:
             self.scale_sigma = self.number_of_interp_scales * self.scale_sigma_factor
             self.scale_exp = (np.arange(self.number_of_scales) - np.floor(self.number_of_scales/2)) * \
                              (self.number_of_interp_scales/self.number_of_scales)
+            self.scale_exp_shift = np.roll(self.scale_exp, int(-np.floor((self.number_of_scales-1)/2)))
+
             self.interp_scale_exp = np.arange(self.number_of_interp_scales) - np.floor(self.number_of_interp_scales/2)
+            self.interp_scale_exp_shift = np.roll(self.interp_scale_exp, int(-np.floor((self.number_of_interp_scales-1)/2)))
 
             self.scaleSizeFactors = self.scale_step ** self.scale_exp
-            self.interpScaleFactors = self.scale_step ** self.interp_scale_exp
+            self.interpScaleFactors = self.scale_step ** self.interp_scale_exp_shift
 
-            self.ys = np.exp(-0.5 * self.scale_exp**2 / self.scale_sigma**2)
+            self.ys = np.exp(-0.5 * self.scale_exp_shift**2 / self.scale_sigma**2)
             self.ysf = np.fft.fft(self.ys)
             self.scale_wnidow = np.hanning(self.ysf.shape[0])
 
@@ -176,6 +179,13 @@ class bmvc_2014_pami_2014_fDSST:
         rs, cs = np.meshgrid(grid_x, grid_y)
         self.y = np.exp(-0.5 / self.output_sigma ** 2 * (rs ** 2 + cs ** 2))
         self.yf = self.fft2(self.y)
+        if self.interpolate_response:
+            self.interp_sz = np.array(self.y.shape) * self.feature_ratio
+            rf = self.resizeDFT_2D(self.yf, self.interp_sz)
+            r = np.real(np.fft.ifft2(rf))
+            # target location is at the maximum response
+            self.v_centre_y, self.h_centre_y = np.unravel_index(r.argmax(), r.shape)
+
         # store pre-computed cosine window
         self.cos_window = np.outer(np.hanning(self.use_sz[0]), np.hanning(self.use_sz[1]))
 
@@ -200,9 +210,6 @@ class bmvc_2014_pami_2014_fDSST:
         # initiliase the appearance
         self.h_num_npca, self.h_num_pca = self.get_features(self.im_crop)
 
-        if self.visualisation:
-            self.x = pyhog.hog_picture(self.h_num_pca[:, :31].reshape(self.im_crop.shape[0]/self.feature_ratio,
-                                                                      self.im_crop.shape[1]/self.feature_ratio, 31))
         # if dimensionality reduction is used: update the projection matrix
         # refere to tPAMI paper eq. (7a)
         self.projection_matrix, self.old_cov_matrix = \
@@ -234,14 +241,12 @@ class bmvc_2014_pami_2014_fDSST:
 
             if self.kernel == 'linear':
                 self.sf_proj = np.fft.fft(self.s_proj, axis=1)
-                self.sf_num = np.multiply(np.conj(self.ysf), self.sf_proj)
+                self.sf_num = np.multiply(self.ysf, np.conj(self.sf_proj))
                 self.sf_den = np.sum(np.multiply(self.sf_proj, np.conj(self.sf_proj)), 0)
 
             elif self.kernel == 'gaussian':
                 # TODO: gaussian kernel
-                self.sf_proj = self.fft2(self.dense_gauss_kernel(self.sigma, self.s_proj))
-                self.sf_num = np.multiply(self.ysf, self.sf_proj)
-                self.sf_den = np.multiply(self.sf_proj, (np.conj(self.sf_proj) + self.lambda_value))
+                pass
 
     def detect(self, im, frame):
         if self.kernel == 'gaussian':
@@ -251,13 +256,10 @@ class bmvc_2014_pami_2014_fDSST:
         self.im_crop = self.get_subwindow(im, self.pos, self.patch_size * self.currentScaleFactor)
 
         if self.number_of_scales > 0:
-            self.im_crop = imresize(self.im_crop, self.patch_size)
+            # for imresize, we always need to pre-cast the image to the desired type
+            self.im_crop = imresize(np.array(self.im_crop, dtype=np.uint8), self.patch_size)
 
         self.xl_npca, self.xl_pca = self.get_features(self.im_crop)
-
-        if self.visualisation:
-            self.x = pyhog.hog_picture(self.xl_pca[:, :31].reshape(self.im_crop.shape[0] / self.feature_ratio,
-                                                                      self.im_crop.shape[1] / self.feature_ratio, 31))
         # project the features of the new appearance example using the new projection matrix
         xt = self.feature_projection(self.xl_npca, self.xl_pca, self.projection_matrix, self.cos_window)
 
@@ -272,20 +274,22 @@ class bmvc_2014_pami_2014_fDSST:
         # if undersampling the features, we want to interpolate the response so it has the same size as the image patch
         # Wudi's thought; really?
         if self.interpolate_response:
-            response_f = self.resizeDFT_2D(response_f, self.patch_size)
+            response_f = self.resizeDFT_2D(response_f, self.interp_sz)
 
         self.response = np.real(np.fft.ifft2(response_f))
         # target location is at the maximum response
         v_centre, h_centre = np.unravel_index(self.response.argmax(), self.response.shape)
-        self.vert_delta, self.horiz_delta = [v_centre - np.floor(self.response.shape[0] / 2),
-                                             h_centre - np.floor(self.response.shape[1] / 2)]
+        self.vert_delta, self.horiz_delta = [v_centre - self.v_centre_y, h_centre - self.h_centre_y]
 
         if self.interpolate_response:
-            self.pos = np.array(self.pos) + np.array([self.vert_delta, self.horiz_delta]) * self.currentScaleFactor
-        else:
-            self.pos = np.array(self.pos) + \
-                       np.array([self.vert_delta, self.horiz_delta]) * self.currentScaleFactor * self.feature_ratio
+            translation_vec = np.array([self.vert_delta, self.horiz_delta]) * self.currentScaleFactor
 
+        else:
+            translation_vec = np.array([self.vert_delta, self.horiz_delta]) * self.currentScaleFactor * self.feature_ratio
+
+        print("frame %d: "%(frame))
+        print(translation_vec)
+        self.pos = np.array(self.pos) + translation_vec
         ################################################################################################################
         # update the scale
         ################################################################################################################
@@ -315,7 +319,8 @@ class bmvc_2014_pami_2014_fDSST:
         ################################################################################################################
         self.im_crop = self.get_subwindow(im, self.pos, self.patch_size * self.currentScaleFactor)
         if self.number_of_scales > 0:
-            self.im_crop = imresize(self.im_crop, self.patch_size)
+            # for imresize, we always need to pre-cast the image to the desired type
+            self.im_crop = imresize(np.array(self.im_crop, dtype=np.uint8), self.patch_size)
 
         xl_npca, xl_pca = self.get_features(self.im_crop)
         self.h_num_pca = (1 - self.interp_factor) * self.h_num_pca + self.interp_factor * xl_pca
@@ -447,19 +452,21 @@ class bmvc_2014_pami_2014_fDSST:
 
             # extract image
             im_patch = im[np.ix_(ys, xs)]
-            im_patch_resized = imresize(im_patch, scale_model_sz.astype(int))
+            im_gray = self.rgb2gray(im_patch)
 
-            im_gray = self.rgb2gray(im_patch_resized)
             # extract scale features
             if self.matlab_legacy:
                 img_matlab = matlab.single(im_gray.tolist())
-                temp_pca_matlab = self.eng.fhog(img_matlab, 4)
+                scale_model_sz_matlab = matlab.single(scale_model_sz.tolist())
+                img_matlab_resize = self.eng.mexResize(img_matlab, scale_model_sz_matlab, 'auto')
+                temp_pca_matlab = self.eng.fhog(img_matlab_resize, 4)
                 temp_hog = np.array(temp_pca_matlab._data).reshape(temp_pca_matlab.size[::-1]).T
             else:
+                im_patch_resized = imresize(np.array(im_gray, dtype=np.uint8), scale_model_sz.astype(int))
                 temp_hog = pyhog.features_pedro(im_patch_resized.astype(np.float64) / 255.0, int(self.feature_ratio))
                 neg_idx = temp_hog < 0
                 temp_hog[neg_idx] = 0
-            out_pca.append(temp_hog.flatten())
+            out_pca.append(temp_hog[:, :, :31].flatten(order='F'))
 
         return np.asarray(out_pca, dtype='float')
 
@@ -471,7 +478,7 @@ class bmvc_2014_pami_2014_fDSST:
         # because the hog output is (dim/4)>1:
         # if self.patch_size.min() < 12:
         #     scale_up_factor = 12. / np.min(im_crop)
-        #     im_crop = imresize(im_crop, np.asarray(self.patch_size * scale_up_factor).astype('int'))
+        #     im_crop = imresize(np.array(im_crop, dtype=np.uint8), np.asarray(self.patch_size * scale_up_factor).astype('int'))
         xo_npca, xo_pca = [], []
 
         im_gray = self.rgb2gray(im_crop)
@@ -495,8 +502,8 @@ class bmvc_2014_pami_2014_fDSST:
                 neg_idx = features_hog < 0
                 features_hog[neg_idx] = 0
 
-            temp_pca = np.concatenate([features_hog, cell_gray[:, :, np.newaxis]], axis=2)
-            xo_pca = temp_pca.reshape([temp_pca.shape[0]*temp_pca.shape[1], temp_pca.shape[2]])
+            temp_pca = np.concatenate([features_hog[:, :, :31], cell_gray[:, :, np.newaxis]], axis=2)
+            xo_pca = temp_pca.reshape([temp_pca.shape[0]*temp_pca.shape[1], temp_pca.shape[2]], order='F')
 
         return xo_npca, xo_pca
 
@@ -527,17 +534,19 @@ class bmvc_2014_pami_2014_fDSST:
         # this is true for the translation filter
         if z_pca.shape[0] > z_pca.shape[1]:
             # compute the mean appearance
-            data_mean = np.mean(z_pca, axis=0)
-            # substract the mean from the appearance to get the data matrix
-            data_matrix = np.subtract(z_pca, data_mean[None, :])
-            # calculate the covariance matrix
-            cov_matrix = np.cov(data_matrix.T)
-            # calculate the principal components (pca_basis) and corresponding variances
-            if len(old_cov_matrix):
-                cov_matrix = (1 - compression_learning_rate) * old_cov_matrix + \
-                             compression_learning_rate * cov_matrix
-            else:
-                cov_matrix = cov_matrix
+            # data_mean = np.mean(z_pca, axis=0)
+            # # substract the mean from the appearance to get the data matrix
+            # data_matrix = np.subtract(z_pca, data_mean[None, :])
+            # # calculate the covariance matrix
+            # cov_matrix = np.cov(data_matrix.T)
+            # # calculate the principal components (pca_basis) and corresponding variances
+            # if len(old_cov_matrix):
+            #     cov_matrix = (1 - compression_learning_rate) * old_cov_matrix + \
+            #                  compression_learning_rate * cov_matrix
+            # else:
+            #     cov_matrix = cov_matrix
+
+            cov_matrix = np.dot(z_pca.T, z_pca)
             U, s, V = np.linalg.svd(cov_matrix)
             S = np.diag(s)
 
@@ -558,8 +567,7 @@ class bmvc_2014_pami_2014_fDSST:
         # we use QR factorisation which is both computational and memory efficient
         # and we do not explicitly construct the auto-correlation matrix
         else:
-            scale_basis = np.linalg.qr(z_pca.T, 'economic')
-            #scale_basis, _ = np.linalg.qr(z_pca.T)
+            scale_basis, _= np.linalg.qr(z_pca.T, 'full')
             projection_matrix = scale_basis.T
             return projection_matrix
 
@@ -575,7 +583,7 @@ class bmvc_2014_pami_2014_fDSST:
             # project the PCA-features using the projection matrix and reshape to a window
             if len(cos_window.shape) > 1:
                 x_proj_pca = np.dot(xo_pca, projection_matrix).reshape(
-                    (cos_window.shape[0], cos_window.shape[1], projection_matrix.shape[1]))
+                    (cos_window.shape[0], cos_window.shape[1], projection_matrix.shape[1]), order='F')
             else:
                 # one dimensional scale featurers
                 x_proj_pca = np.dot(projection_matrix, xo_pca.T)
@@ -619,7 +627,7 @@ class bmvc_2014_pami_2014_fDSST:
         resized_dft = np.zeros(shape=np.array(desiredSize).astype(int), dtype='complex')
 
         mids = np.array(np.ceil(minsz/2.), dtype=int)
-        mide = np.array(np.floor((minsz-1)/2.)-1, dtype=int)
+        mide = np.array(np.floor((minsz-1)/2.), dtype=int)
 
         resized_dft[:mids[0], :mids[1]] = scaling * inputdft[:mids[0], :mids[1]]
         resized_dft[:mids[0], -mide[1]:] = scaling * inputdft[:mids[0], -mide[1]:]
@@ -636,7 +644,7 @@ class bmvc_2014_pami_2014_fDSST:
 
         resized_dft = np.zeros(shape=int(desired_len), dtype='complex')
         mids = int(np.ceil(minsz/2))
-        mide = int(np.floor((minsz-1)/2)-1)
+        mide = int(np.floor((minsz-1)/2))
 
         resized_dft[:mids] = scaling * input_dft_1d[:mids]
         resized_dft[-mide:] = scaling * input_dft_1d[-mide:]
