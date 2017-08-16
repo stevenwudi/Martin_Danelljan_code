@@ -25,16 +25,18 @@ class Tracker:
 if OVERWRITE_RESULT:
     from trackers.cvpr_2014_color_name import cvpr_2014_color_name
     from trackers.bmvc_2014_pami_2014_fDSST import bmvc_2014_pami_2014_fDSST
+    from trackers.iccv_2015_SRDCF import iccv_2015_SRDCF
 
 
 def main(argv):
     if OVERWRITE_RESULT:
-        trackers = [cvpr_2014_color_name()]
-        trackers = [bmvc_2014_pami_2014_fDSST(number_of_scales=17,
-                                              padding=2.0,
-                                              interpolate_response=True,
-                                              kernel='linear',
-                                              compressed_features='gray_hog')]
+        # trackers = [cvpr_2014_color_name()]
+        # trackers = [bmvc_2014_pami_2014_fDSST(number_of_scales=17,
+        #                                       padding=2.0,
+        #                                       interpolate_response=True,
+        #                                       kernel='linear',
+        #                                       compressed_features='gray_hog')]
+        trackers = [iccv_2015_SRDCF()]
     else:
         trackers = [Tracker(name='cvpr_2014_color_name')]
 
@@ -111,7 +113,7 @@ def run_trackers(trackers, seqs, evalType):
     ##################################################
     # chose sequence to run from below
     ##################################################
-    for idxSeq in range(36, numSeq):
+    for idxSeq in range(24, numSeq):
         s = seqs[idxSeq]
         subSeqs, subAnno = butil.get_sub_seqs(s, 20.0, evalType)
 
