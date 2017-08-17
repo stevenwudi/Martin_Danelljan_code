@@ -33,7 +33,13 @@ class iccv_2015_SRDCF:
                  interpolate_response=4,
                  num_GS_iter=4,
                  cell_size=4,
-                 cell_selection_thresh=0.75**2
+                 cell_selection_thresh=0.75**2,
+                 use_reg_window=True,
+                 reg_window_power=2,
+                 reg_window_edge=3,
+                 reg_window_min=0.1,
+                 reg_sparsity_threshold=0.05,
+
                  ):
         """
         Initialisation function
@@ -49,6 +55,10 @@ class iccv_2015_SRDCF:
                                     0 - off, 1 - feature grid, 2 - pixel grid, 4 - Newton's method
         :param num_GS_iter:
         :param cell_selection_thresh: Threshold for reducing the cell size in low-resolution cases
+        :param use_reg_window: flag of using windowed reglurisation
+        :param reg_window_edge: the impact of the spatial regularization (value at the target border),
+                                depends on the detection size and the feature dimensionality
+        :param reg_window_min: the minimum value of the regularization window
         """
         self.search_area_scale = search_area_scale
         self.output_sigma_factor = output_sigma_factor
@@ -59,8 +69,14 @@ class iccv_2015_SRDCF:
         self.feature_ratio = float(self.cell_size)
         self.cell_selection_thresh = cell_selection_thresh
 
-        self.name = 'iccv_2015_SRDCF'
+        # regularisation parameters
+        self.use_reg_window = use_reg_window
+        self.reg_window_power = reg_window_power
+        self.reg_window_edge = reg_window_edge
+        self.reg_window_min = reg_window_min
+        self.reg_sparsity_threshold = reg_sparsity_threshold
 
+        self.name = 'iccv_2015_SRDCF'
 
     def train(self, im, init_rect):
         self.pos = [init_rect[1] + init_rect[3] / 2., init_rect[0] + init_rect[2] / 2.]
@@ -74,14 +90,16 @@ class iccv_2015_SRDCF:
             self.resize_cell_size(search_area, self.cell_selection_thresh, self.filter_max_area, self.feature_ratio,
                                   self.init_target_sz, self.search_area_scale, self.cell_size, self.search_area_shape)
         # consturct the label funnction
-        self.y, self.yf, self.interp_sz, self.support_sz, self.cos_window = self.construct_translational_label_function(
+        self.y, self.yf, self.yf_vec, self.interp_sz, self.support_sz, self.cos_window = self.construct_translational_label_function(
             self.init_target_sz, self.feature_ratio, self.output_sigma_factor, self.use_sz, self.interpolate_response)
 
         # compute the indices for the real, positive and negative parts of the spectrum
         dft_sym_ind, dft_pos_ind, dft_neg_ind, dfs_matrix = self.partition_spectrum2(self.use_sz)
 
-        # create vectorised desired correlation output
-        yf_vec = self.yf.flatten()
+        # regularisation parameters
+        self.construct_regularisation_window(self.init_target_sz, self.feature_ratio, self.use_sz,
+                                             self.reg_window_edge, self.reg_window_min, self.reg_window_power,
+                                             self.reg_sparsity_threshold)
 
 
     def resize_cell_size(self, search_area, cell_selection_thresh, filter_max_area, feature_ratio,
@@ -129,6 +147,8 @@ class iccv_2015_SRDCF:
         rs, cs = np.meshgrid(grid_x, grid_y)
         y = np.exp(-0.5 / output_sigma ** 2 * (rs ** 2 + cs ** 2))
         yf = self.fft2(y)
+        # create vectorised desired correlation output
+        yf_vec = yf.flatten()
 
         if interpolate_response == 1:
             interp_sz = use_sz * feature_ratio
@@ -140,7 +160,7 @@ class iccv_2015_SRDCF:
         # store pre-computed cosine window
         cos_window = np.outer(np.hanning(use_sz[0]), np.hanning(use_sz[1]))
 
-        return y, yf, interp_sz, support_sz, cos_window
+        return y, yf, yf_vec, interp_sz, support_sz, cos_window
 
     def fft2(self, x):
         """
@@ -238,3 +258,42 @@ class iccv_2015_SRDCF:
         dfs_matrix = scipy.sparse.bsr_matrix((v_tot, [i_tot, j_tot]), shape=(dft_length, dft_length))
 
         return dfs_matrix
+
+    def construct_regularisation_window(self, init_target_sz, feature_ratio, use_sz,
+                                        reg_window_edge, reg_window_min, reg_window_power,
+                                        reg_sparsity_threshold):
+        reg_scale = 0.5 * init_target_sz / feature_ratio
+
+        wrg = np.arange(np.floor(use_sz[0])) - np.floor(use_sz[0] / 2)
+        wcg = np.arange(np.floor(use_sz[1])) - np.floor(use_sz[1] / 2)
+        wrs, wcs = np.meshgrid(wrg, wcg)
+        # construct the regularisation window
+        reg_window = (reg_window_edge - reg_window_min) * (np.abs(wrs/reg_scale[0])**reg_window_power +
+                                                           np.abs(wcs/reg_scale[1])**reg_window_power) + reg_window_min
+
+        # compute the DFT and enforce sparsity
+        reg_window_dft = self.fft2(reg_window) /np.prod(use_sz)
+        reg_window_dft_sep = np.stack((np.real(reg_window_dft), np.imag(reg_window_dft)), axis=2)
+        reg_window_dft_sep[np.abs(reg_window_dft_sep) < reg_sparsity_threshold * np.abs(reg_window_dft_sep.flatten()).max()] = 0
+        reg_window_dft = reg_window_dft_sep[:, :, 0] + 1j * reg_window_dft_sep[:, :, 1]
+
+        # do the inverse transoform,  correct window minimum
+        reg_window_sparse = np.real(np.fft.ifft2(reg_window_dft))
+        reg_window_dft[0, 0] = reg_window_dft[0, 0] - np.prod(use_sz) * reg_window_sparse.min() + reg_window_min
+
+
+        return
+
+    def cconvmtx2(self, reg_window_dft):
+        """
+        construct the regularisation matrix
+        :param reg_window_dft:
+        :return:
+        """
+        nrow, ncol = reg_window_dft.shape
+        num_elem = nrow * ncol
+
+        H1 = scipy.sparse.spalloc(num_elem, nrow, nrow * len(np.nonzero(reg_window_dft)[0]))
+
+        # create the first n columns
+
