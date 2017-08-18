@@ -15,6 +15,7 @@ email: stevenwudi@gmail.com  2017/08/016
 
 import numpy as np
 import scipy.sparse
+import scipy.linalg
 import matplotlib.pyplot as plt
 from scipy.misc import imresize
 
@@ -71,6 +72,7 @@ class iccv_2015_SRDCF:
 
         # regularisation parameters
         self.use_reg_window = use_reg_window
+        self.lambda_value = lambda_value
         self.reg_window_power = reg_window_power
         self.reg_window_edge = reg_window_edge
         self.reg_window_min = reg_window_min
@@ -94,12 +96,13 @@ class iccv_2015_SRDCF:
             self.init_target_sz, self.feature_ratio, self.output_sigma_factor, self.use_sz, self.interpolate_response)
 
         # compute the indices for the real, positive and negative parts of the spectrum
-        dft_sym_ind, dft_pos_ind, dft_neg_ind, dfs_matrix = self.partition_spectrum2(self.use_sz)
+        self.dft_sym_ind, self.dft_pos_ind, self.dft_neg_ind, self.dfs_matrix = \
+            self.partition_spectrum2(self.use_sz)
 
         # regularisation parameters
-        self.construct_regularisation_window(self.init_target_sz, self.feature_ratio, self.use_sz,
+        self.construct_regularisation_window(self.use_reg_window, self.init_target_sz, self.feature_ratio, self.use_sz,
                                              self.reg_window_edge, self.reg_window_min, self.reg_window_power,
-                                             self.reg_sparsity_threshold)
+                                             self.reg_sparsity_threshold, self.dfs_matrix, self.lambda_value)
 
 
     def resize_cell_size(self, search_area, cell_selection_thresh, filter_max_area, feature_ratio,
@@ -259,28 +262,41 @@ class iccv_2015_SRDCF:
 
         return dfs_matrix
 
-    def construct_regularisation_window(self, init_target_sz, feature_ratio, use_sz,
+    def construct_regularisation_window(self, use_reg_window, init_target_sz, feature_ratio, use_sz,
                                         reg_window_edge, reg_window_min, reg_window_power,
-                                        reg_sparsity_threshold):
-        reg_scale = 0.5 * init_target_sz / feature_ratio
+                                        reg_sparsity_threshold, dfs_matrix, lambda_value):
+        if use_reg_window:
+            reg_scale = 0.5 * init_target_sz / feature_ratio
 
-        wrg = np.arange(np.floor(use_sz[0])) - np.floor(use_sz[0] / 2)
-        wcg = np.arange(np.floor(use_sz[1])) - np.floor(use_sz[1] / 2)
-        wrs, wcs = np.meshgrid(wrg, wcg)
-        # construct the regularisation window
-        reg_window = (reg_window_edge - reg_window_min) * (np.abs(wrs/reg_scale[0])**reg_window_power +
-                                                           np.abs(wcs/reg_scale[1])**reg_window_power) + reg_window_min
+            wrg = np.arange(np.floor(use_sz[0])) - np.floor(use_sz[0] / 2)
+            wcg = np.arange(np.floor(use_sz[1])) - np.floor(use_sz[1] / 2)
+            wrs, wcs = np.meshgrid(wrg, wcg)
+            # construct the regularisation window
+            reg_window = (reg_window_edge - reg_window_min) * (np.abs(wrs/reg_scale[0])**reg_window_power +
+                                                               np.abs(wcs/reg_scale[1])**reg_window_power) + reg_window_min
 
-        # compute the DFT and enforce sparsity
-        reg_window_dft = self.fft2(reg_window) /np.prod(use_sz)
-        reg_window_dft_sep = np.stack((np.real(reg_window_dft), np.imag(reg_window_dft)), axis=2)
-        reg_window_dft_sep[np.abs(reg_window_dft_sep) < reg_sparsity_threshold * np.abs(reg_window_dft_sep.flatten()).max()] = 0
-        reg_window_dft = reg_window_dft_sep[:, :, 0] + 1j * reg_window_dft_sep[:, :, 1]
+            # compute the DFT and enforce sparsity
+            reg_window_dft = self.fft2(reg_window) / np.prod(use_sz)
+            reg_window_dft_sep = np.stack((np.real(reg_window_dft), np.imag(reg_window_dft)), axis=2)
+            reg_window_dft_sep[np.abs(reg_window_dft_sep) < reg_sparsity_threshold * np.abs(reg_window_dft_sep.flatten()).max()] = 0
+            reg_window_dft = reg_window_dft_sep[:, :, 0] + 1j * reg_window_dft_sep[:, :, 1]
 
-        # do the inverse transoform,  correct window minimum
-        reg_window_sparse = np.real(np.fft.ifft2(reg_window_dft))
-        reg_window_dft[0, 0] = reg_window_dft[0, 0] - np.prod(use_sz) * reg_window_sparse.min() + reg_window_min
+            # do the inverse transoform,  correct window minimum
+            reg_window_sparse = np.real(np.fft.ifft2(reg_window_dft))
+            reg_window_dft[0, 0] = reg_window_dft[0, 0] - np.prod(use_sz) * reg_window_sparse.min() + reg_window_min
 
+            # construct the regularisation matrix
+            regW = self.cconvmtx2(reg_window_dft)
+            regW_dfs = np.real(np.dot(np.dot(dfs_matrix, regW), dfs_matrix.T))
+            WW_block = np.dot(regW_dfs.T, regW_dfs)
+            # if the filter size is small engouth, remove small values in WW_block. It takes too long time otherwise
+            if np.prod(use_sz) < 120**2:
+                WW_block[np.abs(WW_block)>0 and np.abs(WW_block)<1e-4]=0
+        else:
+            WW_block = lambda_value * scipy.sparse.eye(np.prod(use_sz))
+
+        # create a block diagonal regularisation matrix
+        WW = scipy.linalg.block_diag()
 
         return
 
@@ -290,10 +306,33 @@ class iccv_2015_SRDCF:
         :param reg_window_dft:
         :return:
         """
+        # since lil spare matrix has implemented reshape method
+        #reg_window_dft = scipy.sparse.lil_matrix(reg_window_dft)
         nrow, ncol = reg_window_dft.shape
         num_elem = nrow * ncol
 
-        H1 = scipy.sparse.spalloc(num_elem, nrow, nrow * len(np.nonzero(reg_window_dft)[0]))
-
+        H1 = scipy.sparse.csc_matrix((num_elem, ncol))
+        H = scipy.sparse.csc_matrix((num_elem, num_elem))
+        # H1 = np.zeros((num_elem, ncol))
+        # H = np.zeros((num_elem, num_elem))
         # create the first n columns
+        # because scipy sparse matrix does not support roll for the moment
+        # H1[:, 0] = reg_window_dft.reshape((num_elem, 1))
+        # for col in range(1, ncol):
+        #     H1[:, col] = reg_window_dft.reshape((num_elem, 1))
+        for col in range(ncol):
+            H1[:, col] = np.roll(reg_window_dft, shift=col, axis=0).reshape((num_elem, 1))
+
+        H1.eliminate_zeros()
+        # construct all blocks in H
+        # because scipy sparse matrix does not support roll for the moment
+        H[:, ncol * 0:ncol * (0 + 1)] = H1
+        for block in range(1, ncol):
+            H1_roll = scipy.sparse.vstack((H1[ncol*block:, :], H1[:ncol*block, :]))
+            H[:, ncol*block:ncol*(block+1)] = H1_roll
+
+        H.eliminate_zeros()
+        return H
+
+
 
