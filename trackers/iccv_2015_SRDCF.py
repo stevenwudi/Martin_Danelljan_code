@@ -18,6 +18,7 @@ import scipy.sparse
 import scipy.linalg
 import matplotlib.pyplot as plt
 from scipy.misc import imresize
+from scipy.sparse import find
 
 
 class iccv_2015_SRDCF:
@@ -96,8 +97,7 @@ class iccv_2015_SRDCF:
             self.init_target_sz, self.feature_ratio, self.output_sigma_factor, self.use_sz, self.interpolate_response)
 
         # compute the indices for the real, positive and negative parts of the spectrum
-        self.dft_sym_ind, self.dft_pos_ind, self.dft_neg_ind, self.dfs_matrix = \
-            self.partition_spectrum2(self.use_sz)
+        self.dft_sym_ind, self.dft_pos_ind, self.dft_neg_ind, self.dfs_matrix = self.partition_spectrum2(self.use_sz)
 
         # regularisation parameters
         self.construct_regularisation_window(self.use_reg_window, self.init_target_sz, self.feature_ratio, self.use_sz,
@@ -176,7 +176,7 @@ class iccv_2015_SRDCF:
     def partition_spectrum2(self, dft_sz):
         """
         partitions the spectrum of a 2-dimensional signal with dimensions dft_sz into the real part,
-         a set of "positive" frequenceis and the corresponding "negative" frequencies
+         a set of "positive" frequencies and the corresponding "negative" frequencies
         :return:
         """
         #construct the index vector for the half of the spectrum to be saved
@@ -186,7 +186,7 @@ class iccv_2015_SRDCF:
         if dim_even[1]:
             # linear indices of the part of the spectrum that is needed [g_0, g_+]
             dft_ind = np.concatenate([range(spec_dim[0]), range(dft_sz[0],(spec_dim[1]-1)*dft_sz[0]+spec_dim[0])])
-        # linear indices of the part of the spectrum that have a symmetric counterpart g_+
+            # linear indices of the part of the spectrum that have a symmetric counterpart g_+
             dft_pos_ind = np.concatenate([range(1, spec_dim[0]-1),  range(dft_sz[0], (spec_dim[1]-1)*dft_sz[0]),
                                           (spec_dim[1] - 1) * dft_sz[0] + range(1, spec_dim[0]-1)])
 
@@ -257,9 +257,9 @@ class iccv_2015_SRDCF:
         v_tot = np.concatenate([v_sym, v_real_pos, v_real_neg, v_imag_pos, v_imag_neg])
 
         dft_length = len(dft_sym_ind) + len(dft_pos_ind) + len(dft_neg_ind)
-
-        dfs_matrix = scipy.sparse.bsr_matrix((v_tot, [i_tot, j_tot]), shape=(dft_length, dft_length))
-
+        # because python is row major
+        dfs_matrix = scipy.sparse.csc_matrix((v_tot, [i_tot, j_tot]), shape=(dft_length, dft_length))
+        #dfs_matrix = scipy.sparse.csc_matrix((v_tot, [j_tot, i_tot]), shape=(dft_length, dft_length))
         return dfs_matrix
 
     def construct_regularisation_window(self, use_reg_window, init_target_sz, feature_ratio, use_sz,
@@ -280,7 +280,6 @@ class iccv_2015_SRDCF:
             reg_window_dft_sep = np.stack((np.real(reg_window_dft), np.imag(reg_window_dft)), axis=2)
             reg_window_dft_sep[np.abs(reg_window_dft_sep) < reg_sparsity_threshold * np.abs(reg_window_dft_sep.flatten()).max()] = 0
             reg_window_dft = reg_window_dft_sep[:, :, 0] + 1j * reg_window_dft_sep[:, :, 1]
-
             # do the inverse transoform,  correct window minimum
             reg_window_sparse = np.real(np.fft.ifft2(reg_window_dft))
             reg_window_dft[0, 0] = reg_window_dft[0, 0] - np.prod(use_sz) * reg_window_sparse.min() + reg_window_min
@@ -288,8 +287,9 @@ class iccv_2015_SRDCF:
             # construct the regularisation matrix
             regW = self.cconvmtx2(reg_window_dft)
             regW_dfs = np.real(np.dot(np.dot(dfs_matrix, regW), dfs_matrix.T))
+            regW_dfs.eliminate_zeros()
             WW_block = np.dot(regW_dfs.T, regW_dfs)
-            # if the filter size is small engouth, remove small values in WW_block. It takes too long time otherwise
+            # if the filter size is small enough, remove small values in WW_block. It takes too long time otherwise
             if np.prod(use_sz) < 120**2:
                 WW_block[np.abs(WW_block)>0 and np.abs(WW_block)<1e-4]=0
         else:
@@ -306,32 +306,24 @@ class iccv_2015_SRDCF:
         :param reg_window_dft:
         :return:
         """
-        # since lil spare matrix has implemented reshape method
-        #reg_window_dft = scipy.sparse.lil_matrix(reg_window_dft)
         nrow, ncol = reg_window_dft.shape
         num_elem = nrow * ncol
 
-        H1 = scipy.sparse.csc_matrix((num_elem, ncol))
-        H = scipy.sparse.csc_matrix((num_elem, num_elem))
-        # H1 = np.zeros((num_elem, ncol))
-        # H = np.zeros((num_elem, num_elem))
-        # create the first n columns
-        # because scipy sparse matrix does not support roll for the moment
-        # H1[:, 0] = reg_window_dft.reshape((num_elem, 1))
-        # for col in range(1, ncol):
-        #     H1[:, col] = reg_window_dft.reshape((num_elem, 1))
-        for col in range(ncol):
-            H1[:, col] = np.roll(reg_window_dft, shift=col, axis=0).reshape((num_elem, 1))
+        H1 = scipy.sparse.csc_matrix((ncol, num_elem))
+        #H = scipy.sparse.csc_matrix((num_elem, num_elem))
 
+        for row in range(nrow):
+            H1[row, :] = np.roll(reg_window_dft, shift=row, axis=1).flatten()
         H1.eliminate_zeros()
-        # construct all blocks in H
-        # because scipy sparse matrix does not support roll for the moment
-        H[:, ncol * 0:ncol * (0 + 1)] = H1
-        for block in range(1, ncol):
-            H1_roll = scipy.sparse.vstack((H1[ncol*block:, :], H1[:ncol*block, :]))
-            H[:, ncol*block:ncol*(block+1)] = H1_roll
 
-        H.eliminate_zeros()
+        H1 = H1.todense()
+        H = np.zeros((num_elem, num_elem))
+        #H[ncol * 0:ncol * (0 + 1), :] = H1
+        for block in range(ncol):
+            H1_roll = np.roll(H1, shift=block*ncol, axis=1)
+            H[ncol*block:ncol*(block+1), :] = H1_roll
+        H = scipy.sparse.csc_matrix(H)
+
         return H
 
 
